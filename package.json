@@ -1,0 +1,30 @@
+{
+  "name": "crunchbase-mcp-server",
+  "version": "1.0.0",
+  "main": "build/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/index.js",
+    "dev": "ts-node --esm src/index.ts",
+    "setup": "node setup-mcp-server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "crunchbase",
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "claude",
+    "api"
+  ],
+  "author": "Cyreslab-AI <contact@cyreslab.ai>",
+  "license": "MIT",
+  "description": "A Model Context Protocol (MCP) server that provides access to Crunchbase data for AI assistants",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.8.0",
+    "axios": "^1.8.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.2"
+  }
+}
