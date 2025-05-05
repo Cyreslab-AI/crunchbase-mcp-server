@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/cyreslab-ai-crunchbase-mcp-server-badge.png)](https://mseep.ai/app/cyreslab-ai-crunchbase-mcp-server)
+
 # Crunchbase MCP Server
 
 A Model Context Protocol (MCP) server that provides access to Crunchbase data for AI assistants. This server allows AI assistants to search for companies, get company details, funding information, acquisitions, and people data from Crunchbase.
