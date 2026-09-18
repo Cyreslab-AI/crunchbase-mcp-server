@@ -1,15 +1,6 @@
 #!/usr/bin/env node
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListResourcesRequestSchema,
-  ListResourceTemplatesRequestSchema,
-  ListToolsRequestSchema,
-  McpError,
-  ReadResourceRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
+import { Server, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { CrunchbaseAPI } from './crunchbase-api.js';
 import {
   SearchCompaniesInput,
@@ -60,7 +51,7 @@ class CrunchbaseMcpServer {
 
   private setupResourceHandlers() {
     // List available resources
-    this.server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+    this.server.setRequestHandler('resources/list', async () => ({
       resources: [
         {
           uri: 'crunchbase://trending/companies',
@@ -73,7 +64,7 @@ class CrunchbaseMcpServer {
 
     // List resource templates
     this.server.setRequestHandler(
-      ListResourceTemplatesRequestSchema,
+      'resources/templates/list',
       async () => ({
         resourceTemplates: [
           {
@@ -100,7 +91,7 @@ class CrunchbaseMcpServer {
 
     // Handle resource requests
     this.server.setRequestHandler(
-      ReadResourceRequestSchema,
+      'resources/read',
       async (request) => {
         try {
           const uri = request.params.uri;
@@ -167,17 +158,17 @@ class CrunchbaseMcpServer {
             };
           }
 
-          throw new McpError(
-            ErrorCode.InvalidRequest,
+          throw new ProtocolError(
+            ProtocolErrorCode.InvalidRequest,
             `Invalid URI: ${uri}`
           );
         } catch (error) {
           console.error('Error handling resource request:', error);
-          if (error instanceof McpError) {
+          if (error instanceof ProtocolError) {
             throw error;
           }
-          throw new McpError(
-            ErrorCode.InternalError,
+          throw new ProtocolError(
+            ProtocolErrorCode.InternalError,
             error instanceof Error ? error.message : 'Unknown error'
           );
         }
@@ -187,7 +178,7 @@ class CrunchbaseMcpServer {
 
   private setupToolHandlers() {
     // List available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    this.server.setRequestHandler('tools/list', async (): Promise<any> => ({
       tools: [
         {
           name: 'search_companies',
@@ -304,14 +295,14 @@ class CrunchbaseMcpServer {
     }));
 
     // Handle tool calls
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler('tools/call', async (request) => {
       try {
         const { name, arguments: args } = request.params;
 
         switch (name) {
           case 'search_companies': {
             if (!args || typeof args !== 'object') {
-              throw new McpError(ErrorCode.InvalidParams, 'Invalid parameters');
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Invalid parameters');
             }
             const params: SearchCompaniesInput = {
               query: typeof args.query === 'string' ? args.query : undefined,
@@ -335,7 +326,7 @@ class CrunchbaseMcpServer {
 
           case 'get_company_details': {
             if (!args || typeof args !== 'object' || !('name_or_id' in args) || typeof args.name_or_id !== 'string') {
-              throw new McpError(ErrorCode.InvalidParams, 'Missing or invalid name_or_id parameter');
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Missing or invalid name_or_id parameter');
             }
             const params: GetCompanyDetailsInput = { name_or_id: args.name_or_id };
             const company = await this.crunchbaseApi.getCompanyDetails(params);
@@ -351,7 +342,7 @@ class CrunchbaseMcpServer {
 
           case 'get_funding_rounds': {
             if (!args || typeof args !== 'object' || !('company_name_or_id' in args) || typeof args.company_name_or_id !== 'string') {
-              throw new McpError(ErrorCode.InvalidParams, 'Missing or invalid company_name_or_id parameter');
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Missing or invalid company_name_or_id parameter');
             }
             const params: GetFundingRoundsInput = {
               company_name_or_id: args.company_name_or_id,
@@ -370,7 +361,7 @@ class CrunchbaseMcpServer {
 
           case 'get_acquisitions': {
             if (!args || typeof args !== 'object') {
-              throw new McpError(ErrorCode.InvalidParams, 'Invalid parameters');
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Invalid parameters');
             }
             const params: GetAcquisitionsInput = {
               company_name_or_id: typeof args.company_name_or_id === 'string' ? args.company_name_or_id : undefined,
@@ -389,7 +380,7 @@ class CrunchbaseMcpServer {
 
           case 'search_people': {
             if (!args || typeof args !== 'object') {
-              throw new McpError(ErrorCode.InvalidParams, 'Invalid parameters');
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Invalid parameters');
             }
             const params: SearchPeopleInput = {
               query: typeof args.query === 'string' ? args.query : undefined,
@@ -409,8 +400,8 @@ class CrunchbaseMcpServer {
           }
 
           default:
-            throw new McpError(
-              ErrorCode.MethodNotFound,
+            throw new ProtocolError(
+              ProtocolErrorCode.MethodNotFound,
               `Unknown tool: ${name}`
             );
         }
