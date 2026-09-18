@@ -4,11 +4,17 @@ import {
   Company,
   CrunchbaseApiResponse,
   FundingRound,
+  GetInvestorDetailsInput,
+  GetPersonDetailsInput,
+  Investment,
+  InvestorDetails,
   Person,
+  PersonDetails,
   SearchCompaniesInput,
   GetCompanyDetailsInput,
   GetFundingRoundsInput,
   GetAcquisitionsInput,
+  SearchInvestmentsInput,
   SearchPeopleInput
 } from './types.js';
 
@@ -72,25 +78,121 @@ export class CrunchbaseAPI {
   }
 
   /**
+   * Resolve a company to a Crunchbase entity_id (uuid or permalink work
+   * interchangeably as the {entity_id} path segment for /entities/organizations).
+   *
+   * Design note (capability-review fix): the original implementation always
+   * did a name-search-then-take-first-result, which costs an extra API call
+   * and can mis-resolve common names (e.g. "Meta"). Callers who already know
+   * the exact uuid/permalink can pass it directly and skip the search entirely;
+   * the name-search fallback is kept for backward compatibility.
+   *
+   * Verification note: live-testing against the real Crunchbase gateway (with
+   * an invalid key, just to observe routing) showed the legacy GET
+   * `/searches/organizations?query=...` call this fallback used to make
+   * returns 404 - that route appears to no longer exist - while the
+   * structured POST `/searches/organizations` search used here gets past
+   * routing and correctly fails auth (401). The fallback below uses the
+   * POST contract for that reason.
+   */
+  private async resolveOrganizationId(params: { uuid?: string; permalink?: string; name_or_id?: string }): Promise<string> {
+    if (params.uuid) {
+      return params.uuid;
+    }
+    if (params.permalink) {
+      return params.permalink;
+    }
+    if (!params.name_or_id) {
+      throw new Error('Provide a uuid, permalink, or name_or_id to identify the company');
+    }
+
+    const searchResponse = await this.client.post('/searches/organizations', {
+      field_ids: ['identifier', 'uuid', 'permalink'],
+      query: [{ type: 'predicate', field_id: 'identifier', operator_id: 'contains', values: [params.name_or_id] }],
+      limit: 1
+    });
+
+    const results = this.extractEntities<{ uuid: string }>(searchResponse.data);
+    if (results.length === 0) {
+      throw new Error(`Company not found: ${params.name_or_id}`);
+    }
+
+    return results[0].uuid;
+  }
+
+  /**
+   * Resolve a person to a Crunchbase entity_id (uuid or permalink), falling
+   * back to a name search when neither is given. See resolveOrganizationId
+   * for why this uses the POST-based search contract.
+   */
+  private async resolvePersonId(params: { uuid?: string; permalink?: string; name?: string }): Promise<string> {
+    if (params.uuid) {
+      return params.uuid;
+    }
+    if (params.permalink) {
+      return params.permalink;
+    }
+    if (!params.name) {
+      throw new Error('Provide a uuid, permalink, or name to identify the person');
+    }
+
+    const searchResponse = await this.client.post('/searches/people', {
+      field_ids: ['identifier', 'uuid', 'permalink'],
+      query: [{ type: 'predicate', field_id: 'identifier', operator_id: 'contains', values: [params.name] }],
+      limit: 1
+    });
+
+    const results = this.extractEntities<{ uuid: string }>(searchResponse.data);
+    if (results.length === 0) {
+      throw new Error(`Person not found: ${params.name}`);
+    }
+
+    return results[0].uuid;
+  }
+
+  /**
+   * Crunchbase v4 has shipped more than one response envelope across API
+   * generations: the flat `{ data, count, total_count }` shape the legacy
+   * GET-based /searches/* endpoints in this file already assume, and a
+   * `{ count, entities: [{ uuid, properties }] }` / `{ cards: { <card_id>: [...] } }`
+   * shape used by the current POST-based Search API and card sub-resources.
+   * Since this server cannot be exercised against a live paid API key,
+   * new endpoints unwrap defensively instead of assuming a single shape.
+   */
+  private extractEntities<T = any>(payload: any, cardId?: string): T[] {
+    if (!payload) {
+      return [];
+    }
+    if (Array.isArray(payload)) {
+      return payload as T[];
+    }
+    if (Array.isArray(payload.data)) {
+      return payload.data as T[];
+    }
+    if (Array.isArray(payload.entities)) {
+      return payload.entities.map((e: any) =>
+        e && typeof e === 'object' && e.properties
+          ? { uuid: e.uuid, permalink: e.permalink, ...e.properties }
+          : e
+      ) as T[];
+    }
+    if (cardId && payload.cards && Array.isArray(payload.cards[cardId])) {
+      return payload.cards[cardId] as T[];
+    }
+    if (Array.isArray(payload.cards)) {
+      return payload.cards as T[];
+    }
+    return [];
+  }
+
+  /**
    * Get detailed information about a specific company
    */
   async getCompanyDetails(params: GetCompanyDetailsInput): Promise<Company> {
     try {
-      // First, try to search for the company by name
-      const searchResponse = await this.client.get<CrunchbaseApiResponse<Company[]>>('/searches/organizations', {
-        params: {
-          query: params.name_or_id,
-          limit: 1
-        }
-      });
+      const companyId = await this.resolveOrganizationId(params);
 
-      if (searchResponse.data.count === 0) {
-        throw new Error(`Company not found: ${params.name_or_id}`);
-      }
-
-      const companyId = searchResponse.data.data[0].uuid;
-
-      // Then, get the detailed information using the UUID
+      // Then, get the detailed information using the UUID/permalink
       const detailsResponse = await this.client.get<Company>(`/entities/organizations/${companyId}`);
       return detailsResponse.data;
     } catch (error) {
@@ -104,11 +206,16 @@ export class CrunchbaseAPI {
    */
   async getFundingRounds(params: GetFundingRoundsInput): Promise<FundingRound[]> {
     try {
-      // First, get the company UUID
-      const company = await this.getCompanyDetails({ name_or_id: params.company_name_or_id });
+      // Resolve the company id directly when possible so a caller who already
+      // knows the uuid/permalink doesn't pay for an extra details lookup.
+      const companyId = await this.resolveOrganizationId({
+        uuid: params.uuid,
+        permalink: params.permalink,
+        name_or_id: params.company_name_or_id
+      });
 
       // Then, get the funding rounds
-      const response = await this.client.get<CrunchbaseApiResponse<FundingRound[]>>(`/entities/organizations/${company.uuid}/funding_rounds`, {
+      const response = await this.client.get<CrunchbaseApiResponse<FundingRound[]>>(`/entities/organizations/${companyId}/funding_rounds`, {
         params: {
           limit: params.limit || 10,
           order: 'announced_on DESC'
@@ -129,30 +236,212 @@ export class CrunchbaseAPI {
     try {
       let companyId: string | undefined;
 
-      if (params.company_name_or_id) {
-        // Get the company UUID
-        const company = await this.getCompanyDetails({ name_or_id: params.company_name_or_id });
-        companyId = company.uuid;
+      if (params.uuid || params.permalink || params.company_name_or_id) {
+        companyId = await this.resolveOrganizationId({
+          uuid: params.uuid,
+          permalink: params.permalink,
+          name_or_id: params.company_name_or_id
+        });
       }
 
-      // Build the query
-      let query = '';
-      if (companyId) {
-        query = `acquirer_identifier.uuid:${companyId} OR acquiree_identifier.uuid:${companyId}`;
+      const fieldIds = [
+        'identifier', 'uuid', 'permalink', 'acquirer_identifier', 'acquiree_identifier',
+        'announced_on', 'completed_on', 'price', 'price_currency_code',
+        'acquisition_type', 'acquisition_status', 'acquisition_terms', 'created_at', 'updated_at'
+      ];
+      const limit = params.limit || 10;
+      const order = [{ field_id: 'announced_on', sort: 'desc' }];
+
+      // Note: like the other /searches/* calls in this file, this used to be
+      // a GET with a Lucene-style query string ("field:value OR field:value").
+      // Live-testing against the real gateway showed that route returns 404 -
+      // it appears to no longer exist - while the structured POST contract
+      // below gets past routing and correctly fails auth instead.
+      if (!companyId) {
+        const response = await this.client.post('/searches/acquisitions', { field_ids: fieldIds, query: [], order, limit });
+        return this.extractEntities<Acquisition>(response.data);
       }
 
-      // Get the acquisitions
-      const response = await this.client.get<CrunchbaseApiResponse<Acquisition[]>>('/searches/acquisitions', {
+      // The Search API only ANDs predicates together, so "acquirer OR
+      // acquiree" needs two requests merged (and deduped) client-side.
+      const [asAcquirer, asAcquiree] = await Promise.all([
+        this.client.post('/searches/acquisitions', {
+          field_ids: fieldIds,
+          query: [{ type: 'predicate', field_id: 'acquirer_identifier', operator_id: 'eq', values: [companyId] }],
+          order,
+          limit
+        }),
+        this.client.post('/searches/acquisitions', {
+          field_ids: fieldIds,
+          query: [{ type: 'predicate', field_id: 'acquiree_identifier', operator_id: 'eq', values: [companyId] }],
+          order,
+          limit
+        })
+      ]);
+
+      const merged = [
+        ...this.extractEntities<Acquisition>(asAcquirer.data),
+        ...this.extractEntities<Acquisition>(asAcquiree.data)
+      ];
+      const seen = new Set<string>();
+      const deduped = merged.filter((acquisition) => {
+        if (!acquisition.uuid || seen.has(acquisition.uuid)) {
+          return false;
+        }
+        seen.add(acquisition.uuid);
+        return true;
+      });
+      deduped.sort((a, b) => (b.announced_on || '').localeCompare(a.announced_on || ''));
+
+      return deduped.slice(0, limit);
+    } catch (error) {
+      console.error('Error getting acquisitions:', error);
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get a person's full profile: bio fields plus their job (past + current
+   * role) and education history, via card_ids on the entity lookup.
+   */
+  async getPersonDetails(params: GetPersonDetailsInput): Promise<PersonDetails> {
+    try {
+      const personId = await this.resolvePersonId(params);
+
+      const response = await this.client.get<PersonDetails>(`/entities/people/${personId}`, {
         params: {
-          query,
-          limit: params.limit || 10,
-          order: 'announced_on DESC'
+          card_ids: 'jobs,degrees,founded_organizations'
         }
       });
 
-      return response.data.data;
+      const person = response.data as any;
+      return {
+        ...person,
+        jobs: this.extractEntities(person, 'jobs'),
+        degrees: this.extractEntities(person, 'degrees'),
+        founded_organizations: this.extractEntities(person, 'founded_organizations')
+      };
     } catch (error) {
-      console.error('Error getting acquisitions:', error);
+      console.error('Error getting person details:', error);
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Get an investor's profile plus the investments it has participated in
+   * (its portfolio) - answers "what has investor Y backed". The investor is
+   * modeled as an Organization (VC firm, corporate investor, etc.) with the
+   * `participated_investments` card layered on top, per the documented v4
+   * card taxonomy (e.g. GET /entities/organizations/sequoia-capital/cards/participated_investments).
+   */
+  async getInvestorDetails(params: GetInvestorDetailsInput): Promise<InvestorDetails> {
+    try {
+      const investorId = await this.resolveOrganizationId({
+        uuid: params.uuid,
+        permalink: params.permalink,
+        name_or_id: params.name
+      });
+
+      const detailsResponse = await this.client.get<InvestorDetails>(`/entities/organizations/${investorId}`);
+
+      let participatedInvestments: Investment[] = [];
+      try {
+        const cardResponse = await this.client.get(`/entities/organizations/${investorId}/cards/participated_investments`, {
+          params: {
+            limit: params.limit || 10,
+            order: 'announced_on desc'
+          }
+        });
+        participatedInvestments = this.extractEntities<Investment>(cardResponse.data, 'participated_investments');
+      } catch (cardError) {
+        // The investor profile is still useful even if the portfolio card
+        // fails or isn't available for this entity (e.g. it isn't an investor).
+        console.error('Error getting participated_investments card:', cardError);
+      }
+
+      return {
+        ...detailsResponse.data,
+        participated_investments: participatedInvestments
+      };
+    } catch (error) {
+      console.error('Error getting investor details:', error);
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Search investment records - "who invested in X" (filter by organization)
+   * or "what has investor Y backed" (filter by investor). Uses the current
+   * documented v4 Search API contract: POST /searches/investments with a
+   * structured predicate query, distinct from the older query-string style
+   * the pre-existing search_* methods in this file use.
+   */
+  async searchInvestments(params: SearchInvestmentsInput): Promise<Investment[]> {
+    try {
+      const query: Array<{ type: string; field_id: string; operator_id: string; values: string[] }> = [];
+
+      const organizationId = params.organization_uuid || params.organization_permalink;
+      if (organizationId) {
+        query.push({ type: 'predicate', field_id: 'organization_identifier', operator_id: 'eq', values: [organizationId] });
+      }
+
+      const investorId = params.investor_uuid || params.investor_permalink;
+      if (investorId) {
+        query.push({ type: 'predicate', field_id: 'investor_identifier', operator_id: 'eq', values: [investorId] });
+      }
+
+      if (params.funding_round_uuid) {
+        query.push({ type: 'predicate', field_id: 'funding_round_identifier', operator_id: 'eq', values: [params.funding_round_uuid] });
+      }
+
+      const response = await this.client.post('/searches/investments', {
+        field_ids: [
+          'identifier',
+          'uuid',
+          'permalink',
+          'announced_on',
+          'investor_identifier',
+          'organization_identifier',
+          'funding_round_identifier',
+          'funding_round_investment_type',
+          'investor_stage',
+          'is_lead_investor',
+          'partner_identifiers'
+        ],
+        query,
+        order: [{ field_id: 'announced_on', sort: 'desc' }],
+        limit: params.limit || 10,
+        ...(params.after_id ? { after_id: params.after_id } : {})
+      });
+
+      return this.extractEntities<Investment>(response.data);
+    } catch (error) {
+      console.error('Error searching investments:', error);
+      throw this.handleError(error);
+    }
+  }
+
+  /**
+   * Suggest organization permalinks/names for a partial query, backing the
+   * `crunchbase://organization/{permalink}` resource template's argument
+   * completion via Crunchbase's own /autocompletes endpoint.
+   */
+  async autocompleteOrganizations(query: string, limit = 10): Promise<string[]> {
+    try {
+      const response = await this.client.get('/autocompletes', {
+        params: {
+          query,
+          collection_ids: 'organization.companies',
+          limit
+        }
+      });
+
+      const entities = Array.isArray(response.data?.entities) ? response.data.entities : [];
+      return entities
+        .map((entity: any) => entity?.identifier?.permalink || entity?.permalink)
+        .filter((permalink: unknown): permalink is string => typeof permalink === 'string' && permalink.length > 0);
+    } catch (error) {
+      console.error('Error autocompleting organizations:', error);
       throw this.handleError(error);
     }
   }

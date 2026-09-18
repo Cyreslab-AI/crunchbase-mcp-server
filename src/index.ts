@@ -7,7 +7,10 @@ import {
   GetCompanyDetailsInput,
   GetFundingRoundsInput,
   GetAcquisitionsInput,
-  SearchPeopleInput
+  SearchPeopleInput,
+  GetPersonDetailsInput,
+  GetInvestorDetailsInput,
+  SearchInvestmentsInput
 } from './types.js';
 
 // JSON Schema fragments describing the actual Crunchbase entity shapes returned by
@@ -172,6 +175,115 @@ const SEARCH_PEOPLE_OUTPUT_SCHEMA = {
   required: ['count', 'people'],
 } as const;
 
+const JOB_SUMMARY_SCHEMA = {
+  type: 'object',
+  properties: {
+    uuid: { type: 'string' },
+    title: { type: 'string' },
+    organization_identifier: {
+      type: 'object',
+      properties: { uuid: { type: 'string' }, name: { type: 'string' }, permalink: { type: 'string' } },
+    },
+    started_on: { type: 'string' },
+    ended_on: { type: 'string' },
+    is_current: { type: 'boolean' },
+  },
+} as const;
+
+const DEGREE_SUMMARY_SCHEMA = {
+  type: 'object',
+  properties: {
+    uuid: { type: 'string' },
+    degree_type_name: { type: 'string' },
+    subject: { type: 'string' },
+    school_identifier: {
+      type: 'object',
+      properties: { uuid: { type: 'string' }, name: { type: 'string' } },
+    },
+    started_on: { type: 'string' },
+    completed_on: { type: 'string' },
+  },
+} as const;
+
+const GET_PERSON_DETAILS_OUTPUT_SCHEMA = {
+  type: 'object',
+  description: 'A Crunchbase person profile, including bio and career/education history',
+  properties: {
+    ...PERSON_SCHEMA.properties,
+    description: { type: 'string' },
+    born_on: { type: 'string' },
+    died_on: { type: 'string' },
+    aliases: { type: 'array', items: { type: 'string' } },
+    location_identifiers: { type: 'array', items: LOCATION_IDENTIFIER_SCHEMA },
+    num_current_jobs: { type: 'number' },
+    num_founded_organizations: { type: 'number' },
+    jobs: { type: 'array', items: JOB_SUMMARY_SCHEMA },
+    degrees: { type: 'array', items: DEGREE_SUMMARY_SCHEMA },
+    founded_organizations: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { uuid: { type: 'string' }, name: { type: 'string' }, permalink: { type: 'string' } },
+      },
+    },
+  },
+  required: ['uuid', 'name'],
+} as const;
+
+const INVESTMENT_SCHEMA = {
+  type: 'object',
+  description: 'A Crunchbase investment (one investor participating in one funding round)',
+  properties: {
+    uuid: { type: 'string' },
+    name: { type: 'string' },
+    announced_on: { type: 'string' },
+    investor_identifier: INVESTOR_IDENTIFIER_SCHEMA,
+    organization_identifier: {
+      type: 'object',
+      properties: { uuid: { type: 'string' }, name: { type: 'string' }, permalink: { type: 'string' } },
+    },
+    funding_round_identifier: {
+      type: 'object',
+      properties: { uuid: { type: 'string' }, name: { type: 'string' }, permalink: { type: 'string' } },
+    },
+    funding_round_investment_type: { type: 'string' },
+    funding_round_money_raised: { type: 'number' },
+    investor_stage: { type: 'array', items: { type: 'string' } },
+    is_lead_investor: { type: 'boolean' },
+    partner_identifiers: { type: 'array', items: INVESTOR_IDENTIFIER_SCHEMA },
+    money_invested: { type: 'number' },
+    money_invested_currency_code: { type: 'string' },
+    created_at: { type: 'string' },
+    updated_at: { type: 'string' },
+  },
+  required: ['uuid'],
+} as const;
+
+const SEARCH_INVESTMENTS_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    count: { type: 'number' },
+    investments: { type: 'array', items: INVESTMENT_SCHEMA },
+  },
+  required: ['count', 'investments'],
+} as const;
+
+const GET_INVESTOR_DETAILS_OUTPUT_SCHEMA = {
+  type: 'object',
+  description: 'A Crunchbase investor profile (an organization) plus its investment portfolio',
+  properties: {
+    ...COMPANY_SCHEMA.properties,
+    investor_type: { type: 'array', items: { type: 'string' } },
+    investment_stage: { type: 'array', items: { type: 'string' } },
+    num_investments: { type: 'number' },
+    num_lead_investments: { type: 'number' },
+    num_exits: { type: 'number' },
+    num_investors: { type: 'number' },
+    participated_investments: { type: 'array', items: INVESTMENT_SCHEMA },
+  },
+  required: ['uuid', 'name'],
+} as const;
+
 // All tools only read data from the public Crunchbase API; none of them modify
 // anything, so every tool shares the same annotations.
 const READ_ONLY_EXTERNAL_ANNOTATIONS = {
@@ -201,6 +313,10 @@ class CrunchbaseMcpServer {
         capabilities: {
           resources: {},
           tools: {},
+          // Backs the crunchbase://organization/{permalink} resource
+          // template's {permalink} argument completion (see
+          // setupCompletionHandlers) with real Crunchbase autocomplete data.
+          completions: {},
         },
       }
     );
@@ -209,6 +325,7 @@ class CrunchbaseMcpServer {
 
     this.setupResourceHandlers();
     this.setupToolHandlers();
+    this.setupCompletionHandlers();
 
     // Error handling
     this.server.onerror = (error) => console.error('[MCP Error]', error);
@@ -253,6 +370,15 @@ class CrunchbaseMcpServer {
             name: 'Company Acquisitions',
             mimeType: 'application/json',
             description: 'Acquisitions made by or of a specific company',
+          },
+          {
+            uriTemplate: 'crunchbase://organization/{permalink}',
+            name: 'Organization Details (by permalink)',
+            mimeType: 'application/json',
+            description:
+              'Detailed information about a specific organization, looked up directly by its exact ' +
+              'Crunchbase permalink (skips the ambiguous name-search-then-resolve step). The ' +
+              '{permalink} argument supports completion backed by the real Crunchbase autocomplete API.',
           },
         ],
       })
@@ -327,6 +453,25 @@ class CrunchbaseMcpServer {
             };
           }
 
+          // Handle organization-by-permalink resource template. Unlike
+          // crunchbase://companies/{name} above, {permalink} is resolved
+          // directly (no name search), and its completion is backed by the
+          // real Crunchbase /autocompletes endpoint (see setupCompletionHandlers).
+          const organizationMatch = uri.match(/^crunchbase:\/\/organization\/([^/]+)$/);
+          if (organizationMatch) {
+            const permalink = decodeURIComponent(organizationMatch[1]);
+            const organization = await this.crunchbaseApi.getCompanyDetails({ permalink });
+            return {
+              contents: [
+                {
+                  uri,
+                  mimeType: 'application/json',
+                  text: JSON.stringify(organization, null, 2),
+                },
+              ],
+            };
+          }
+
           throw new ProtocolError(
             ProtocolErrorCode.InvalidRequest,
             `Invalid URI: ${uri}`
@@ -343,6 +488,48 @@ class CrunchbaseMcpServer {
         }
       }
     );
+  }
+
+  // Backs argument completion for resource templates (the `completions`
+  // server capability + `completion/complete` request, per the MCP spec).
+  // The SDK's higher-level `completable()`/`McpServer` helper isn't in play
+  // here since this server is built on the low-level `Server` class, but
+  // `completion/complete` is just another typed request handler at that
+  // level, so it's wired up directly instead.
+  private setupCompletionHandlers() {
+    this.server.setRequestHandler('completion/complete', async (request) => {
+      try {
+        const { ref, argument } = request.params;
+
+        // Only the crunchbase://organization/{permalink} template's
+        // {permalink} argument has real completion data (via Crunchbase's
+        // own /autocompletes endpoint). Everything else - prompt refs, or
+        // other resource templates/arguments - returns no suggestions
+        // rather than an error, per the spec's guidance for unsupported refs.
+        if (
+          ref.type === 'ref/resource' &&
+          ref.uri === 'crunchbase://organization/{permalink}' &&
+          argument.name === 'permalink' &&
+          argument.value
+        ) {
+          const values = await this.crunchbaseApi.autocompleteOrganizations(argument.value, 10);
+          return {
+            completion: {
+              values,
+              hasMore: false,
+              total: values.length,
+            },
+          };
+        }
+
+        return { completion: { values: [] } };
+      } catch (error) {
+        console.error('Error handling completion request:', error);
+        // Completion is a best-effort UX affordance, not a hard requirement -
+        // fail soft with no suggestions rather than surfacing a protocol error.
+        return { completion: { values: [] } };
+      }
+    });
   }
 
   private setupToolHandlers() {
@@ -390,49 +577,78 @@ class CrunchbaseMcpServer {
         },
         {
           name: 'get_company_details',
-          description: 'Get detailed information about a specific company',
+          description:
+            'Get detailed information about a specific company. Prefer uuid or permalink when known: ' +
+            'name_or_id resolves ambiguously (a name search, first result wins), which can pick the ' +
+            'wrong company for common names.',
           inputSchema: {
             type: 'object',
             properties: {
               name_or_id: {
                 type: 'string',
-                description: 'Company name or UUID',
+                description: 'Company name to search for (ambiguous - first matching result is used). Ignored if uuid or permalink is given.',
+              },
+              uuid: {
+                type: 'string',
+                description: 'Exact Crunchbase UUID of the company. Takes priority over permalink and name_or_id.',
+              },
+              permalink: {
+                type: 'string',
+                description: 'Exact Crunchbase permalink of the company (e.g. "openai"). Takes priority over name_or_id.',
               },
             },
-            required: ['name_or_id'],
           },
           outputSchema: GET_COMPANY_DETAILS_OUTPUT_SCHEMA,
           annotations: READ_ONLY_EXTERNAL_ANNOTATIONS,
         },
         {
           name: 'get_funding_rounds',
-          description: 'Get funding rounds for a specific company',
+          description:
+            'Get funding rounds for a specific company. Prefer uuid or permalink when known, to avoid ' +
+            'ambiguous name resolution and an extra lookup call.',
           inputSchema: {
             type: 'object',
             properties: {
               company_name_or_id: {
                 type: 'string',
-                description: 'Company name or UUID',
+                description: 'Company name to search for (ambiguous - first matching result is used). Ignored if uuid or permalink is given.',
+              },
+              uuid: {
+                type: 'string',
+                description: 'Exact Crunchbase UUID of the company. Takes priority over permalink and company_name_or_id.',
+              },
+              permalink: {
+                type: 'string',
+                description: 'Exact Crunchbase permalink of the company. Takes priority over company_name_or_id.',
               },
               limit: {
                 type: 'number',
                 description: 'Maximum number of results to return (default: 10)',
               },
             },
-            required: ['company_name_or_id'],
           },
           outputSchema: GET_FUNDING_ROUNDS_OUTPUT_SCHEMA,
           annotations: READ_ONLY_EXTERNAL_ANNOTATIONS,
         },
         {
           name: 'get_acquisitions',
-          description: 'Get acquisitions made by or of a specific company',
+          description:
+            'Get acquisitions made by or of a specific company (or all recent acquisitions if no company ' +
+            'is given). Prefer uuid or permalink when known, to avoid ambiguous name resolution.',
           inputSchema: {
             type: 'object',
             properties: {
               company_name_or_id: {
                 type: 'string',
-                description: 'Company name or UUID',
+                description: 'Company name to search for (ambiguous - first matching result is used). Ignored if uuid or permalink is given.',
+              },
+              uuid: {
+                type: 'string',
+                description: 'Exact Crunchbase UUID of the company. Takes priority over permalink and company_name_or_id.',
+              },
+              permalink: {
+                type: 'string',
+                description: 'Exact Crunchbase permalink of the company. Takes priority over company_name_or_id.',
               },
               limit: {
                 type: 'number',
@@ -468,6 +684,105 @@ class CrunchbaseMcpServer {
             },
           },
           outputSchema: SEARCH_PEOPLE_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_EXTERNAL_ANNOTATIONS,
+        },
+        {
+          name: 'get_person_details',
+          description:
+            "Get a person's full profile: bio fields (description, born_on, aliases, etc.) plus their " +
+            'job history (past and current roles) and education. Complements search_people, which only ' +
+            "returns a person's current featured role.",
+          inputSchema: {
+            type: 'object',
+            properties: {
+              name: {
+                type: 'string',
+                description: 'Person name to search for (ambiguous - first matching result is used). Ignored if uuid or permalink is given.',
+              },
+              uuid: {
+                type: 'string',
+                description: 'Exact Crunchbase UUID of the person. Takes priority over permalink and name.',
+              },
+              permalink: {
+                type: 'string',
+                description: 'Exact Crunchbase permalink of the person. Takes priority over name.',
+              },
+            },
+          },
+          outputSchema: GET_PERSON_DETAILS_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_EXTERNAL_ANNOTATIONS,
+        },
+        {
+          name: 'get_investor_details',
+          description:
+            "Get an investor's profile (an organization such as a VC firm or corporate investor) plus " +
+            'the investments it has participated in - answers "what has investor Y backed". Prefer uuid ' +
+            'or permalink when known.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              name: {
+                type: 'string',
+                description: 'Investor name to search for (ambiguous - first matching result is used). Ignored if uuid or permalink is given.',
+              },
+              uuid: {
+                type: 'string',
+                description: 'Exact Crunchbase UUID of the investor organization. Takes priority over permalink and name.',
+              },
+              permalink: {
+                type: 'string',
+                description: 'Exact Crunchbase permalink of the investor organization (e.g. "sequoia-capital"). Takes priority over name.',
+              },
+              limit: {
+                type: 'number',
+                description: 'Maximum number of portfolio investments to return (default: 10)',
+              },
+            },
+          },
+          outputSchema: GET_INVESTOR_DETAILS_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_EXTERNAL_ANNOTATIONS,
+        },
+        {
+          name: 'search_investments',
+          description:
+            'Search individual investment records - one investor participating in one funding round. ' +
+            'Filter by organization (the company that received the investment) to answer "who invested ' +
+            'in X", or by investor to answer "what has investor Y backed". At least one filter should ' +
+            'usually be given, or results are unfiltered/broad.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              organization_uuid: {
+                type: 'string',
+                description: 'UUID of the company that received the investment (the funded organization).',
+              },
+              organization_permalink: {
+                type: 'string',
+                description: 'Permalink of the company that received the investment. Ignored if organization_uuid is given.',
+              },
+              investor_uuid: {
+                type: 'string',
+                description: 'UUID of the investor (organization or person) that made the investment.',
+              },
+              investor_permalink: {
+                type: 'string',
+                description: 'Permalink of the investor. Ignored if investor_uuid is given.',
+              },
+              funding_round_uuid: {
+                type: 'string',
+                description: 'UUID of a specific funding round to list investments for.',
+              },
+              limit: {
+                type: 'number',
+                description: 'Maximum number of results to return (default: 10)',
+              },
+              after_id: {
+                type: 'string',
+                description: 'Pagination cursor: pass the uuid of the last result from a previous call to get the next page.',
+              },
+            },
+          },
+          outputSchema: SEARCH_INVESTMENTS_OUTPUT_SCHEMA,
           annotations: READ_ONLY_EXTERNAL_ANNOTATIONS,
         },
       ],
@@ -508,10 +823,17 @@ class CrunchbaseMcpServer {
           }
 
           case 'get_company_details': {
-            if (!args || typeof args !== 'object' || !('name_or_id' in args) || typeof args.name_or_id !== 'string') {
-              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Missing or invalid name_or_id parameter');
+            if (!args || typeof args !== 'object') {
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Invalid parameters');
             }
-            const params: GetCompanyDetailsInput = { name_or_id: args.name_or_id };
+            const params: GetCompanyDetailsInput = {
+              name_or_id: typeof args.name_or_id === 'string' ? args.name_or_id : undefined,
+              uuid: typeof args.uuid === 'string' ? args.uuid : undefined,
+              permalink: typeof args.permalink === 'string' ? args.permalink : undefined,
+            };
+            if (!params.name_or_id && !params.uuid && !params.permalink) {
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Provide one of: uuid, permalink, or name_or_id');
+            }
             const company = await this.crunchbaseApi.getCompanyDetails(params);
             return {
               content: [
@@ -525,13 +847,18 @@ class CrunchbaseMcpServer {
           }
 
           case 'get_funding_rounds': {
-            if (!args || typeof args !== 'object' || !('company_name_or_id' in args) || typeof args.company_name_or_id !== 'string') {
-              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Missing or invalid company_name_or_id parameter');
+            if (!args || typeof args !== 'object') {
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Invalid parameters');
             }
             const params: GetFundingRoundsInput = {
-              company_name_or_id: args.company_name_or_id,
+              company_name_or_id: typeof args.company_name_or_id === 'string' ? args.company_name_or_id : undefined,
+              uuid: typeof args.uuid === 'string' ? args.uuid : undefined,
+              permalink: typeof args.permalink === 'string' ? args.permalink : undefined,
               limit: typeof args.limit === 'number' ? args.limit : undefined
             };
+            if (!params.company_name_or_id && !params.uuid && !params.permalink) {
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Provide one of: uuid, permalink, or company_name_or_id');
+            }
             const fundingRounds = await this.crunchbaseApi.getFundingRounds(params);
             return {
               content: [
@@ -553,6 +880,8 @@ class CrunchbaseMcpServer {
             }
             const params: GetAcquisitionsInput = {
               company_name_or_id: typeof args.company_name_or_id === 'string' ? args.company_name_or_id : undefined,
+              uuid: typeof args.uuid === 'string' ? args.uuid : undefined,
+              permalink: typeof args.permalink === 'string' ? args.permalink : undefined,
               limit: typeof args.limit === 'number' ? args.limit : undefined
             };
             const acquisitions = await this.crunchbaseApi.getAcquisitions(params);
@@ -591,6 +920,83 @@ class CrunchbaseMcpServer {
               structuredContent: {
                 count: people.length,
                 people,
+              },
+            };
+          }
+
+          case 'get_person_details': {
+            if (!args || typeof args !== 'object') {
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Invalid parameters');
+            }
+            const params: GetPersonDetailsInput = {
+              name: typeof args.name === 'string' ? args.name : undefined,
+              uuid: typeof args.uuid === 'string' ? args.uuid : undefined,
+              permalink: typeof args.permalink === 'string' ? args.permalink : undefined,
+            };
+            if (!params.name && !params.uuid && !params.permalink) {
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Provide one of: uuid, permalink, or name');
+            }
+            const person = await this.crunchbaseApi.getPersonDetails(params);
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(person, null, 2),
+                },
+              ],
+              structuredContent: person,
+            };
+          }
+
+          case 'get_investor_details': {
+            if (!args || typeof args !== 'object') {
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Invalid parameters');
+            }
+            const params: GetInvestorDetailsInput = {
+              name: typeof args.name === 'string' ? args.name : undefined,
+              uuid: typeof args.uuid === 'string' ? args.uuid : undefined,
+              permalink: typeof args.permalink === 'string' ? args.permalink : undefined,
+              limit: typeof args.limit === 'number' ? args.limit : undefined,
+            };
+            if (!params.name && !params.uuid && !params.permalink) {
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Provide one of: uuid, permalink, or name');
+            }
+            const investor = await this.crunchbaseApi.getInvestorDetails(params);
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(investor, null, 2),
+                },
+              ],
+              structuredContent: investor,
+            };
+          }
+
+          case 'search_investments': {
+            if (!args || typeof args !== 'object') {
+              throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'Invalid parameters');
+            }
+            const params: SearchInvestmentsInput = {
+              organization_uuid: typeof args.organization_uuid === 'string' ? args.organization_uuid : undefined,
+              organization_permalink: typeof args.organization_permalink === 'string' ? args.organization_permalink : undefined,
+              investor_uuid: typeof args.investor_uuid === 'string' ? args.investor_uuid : undefined,
+              investor_permalink: typeof args.investor_permalink === 'string' ? args.investor_permalink : undefined,
+              funding_round_uuid: typeof args.funding_round_uuid === 'string' ? args.funding_round_uuid : undefined,
+              limit: typeof args.limit === 'number' ? args.limit : undefined,
+              after_id: typeof args.after_id === 'string' ? args.after_id : undefined,
+            };
+            const investments = await this.crunchbaseApi.searchInvestments(params);
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(investments, null, 2),
+                },
+              ],
+              structuredContent: {
+                count: investments.length,
+                investments,
               },
             };
           }
