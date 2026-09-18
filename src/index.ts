@@ -10,6 +10,175 @@ import {
   SearchPeopleInput
 } from './types.js';
 
+// JSON Schema fragments describing the actual Crunchbase entity shapes returned by
+// CrunchbaseAPI (see src/types.ts and src/crunchbase-api.ts).
+
+const LOCATION_IDENTIFIER_SCHEMA = {
+  type: 'object',
+  properties: {
+    uuid: { type: 'string' },
+    name: { type: 'string' },
+    location_type: { type: 'string' },
+  },
+} as const;
+
+const CATEGORY_SCHEMA = {
+  type: 'object',
+  properties: {
+    uuid: { type: 'string' },
+    name: { type: 'string' },
+  },
+} as const;
+
+const COMPANY_SCHEMA = {
+  type: 'object',
+  description: 'A Crunchbase organization',
+  properties: {
+    uuid: { type: 'string' },
+    name: { type: 'string' },
+    short_description: { type: 'string' },
+    website_url: { type: 'string' },
+    linkedin_url: { type: 'string' },
+    twitter_url: { type: 'string' },
+    facebook_url: { type: 'string' },
+    logo_url: { type: 'string' },
+    location_identifiers: { type: 'array', items: LOCATION_IDENTIFIER_SCHEMA },
+    categories: { type: 'array', items: CATEGORY_SCHEMA },
+    founded_on: { type: 'string' },
+    closed_on: { type: 'string' },
+    num_employees_min: { type: 'number' },
+    num_employees_max: { type: 'number' },
+    status: { type: 'string' },
+    rank: { type: 'number' },
+    created_at: { type: 'string' },
+    updated_at: { type: 'string' },
+  },
+  required: ['uuid', 'name'],
+} as const;
+
+const SEARCH_COMPANIES_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    count: { type: 'number' },
+    companies: { type: 'array', items: COMPANY_SCHEMA },
+  },
+  required: ['count', 'companies'],
+} as const;
+
+const GET_COMPANY_DETAILS_OUTPUT_SCHEMA = COMPANY_SCHEMA;
+
+const INVESTOR_IDENTIFIER_SCHEMA = {
+  type: 'object',
+  properties: {
+    uuid: { type: 'string' },
+    name: { type: 'string' },
+    investor_type: { type: 'string' },
+  },
+} as const;
+
+const FUNDING_ROUND_SCHEMA = {
+  type: 'object',
+  description: 'A Crunchbase funding round',
+  properties: {
+    uuid: { type: 'string' },
+    name: { type: 'string' },
+    announced_on: { type: 'string' },
+    closed_on: { type: 'string' },
+    investment_type: { type: 'string' },
+    money_raised: { type: 'number' },
+    money_raised_currency_code: { type: 'string' },
+    target_money_raised: { type: 'number' },
+    target_money_raised_currency_code: { type: 'string' },
+    investor_identifiers: { type: 'array', items: INVESTOR_IDENTIFIER_SCHEMA },
+    lead_investor_identifiers: { type: 'array', items: INVESTOR_IDENTIFIER_SCHEMA },
+    created_at: { type: 'string' },
+    updated_at: { type: 'string' },
+  },
+  required: ['uuid', 'name', 'announced_on', 'investment_type'],
+} as const;
+
+const GET_FUNDING_ROUNDS_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    count: { type: 'number' },
+    funding_rounds: { type: 'array', items: FUNDING_ROUND_SCHEMA },
+  },
+  required: ['count', 'funding_rounds'],
+} as const;
+
+const ACQUISITION_SCHEMA = {
+  type: 'object',
+  description: 'A Crunchbase acquisition',
+  properties: {
+    uuid: { type: 'string' },
+    acquirer_identifier: {
+      type: 'object',
+      properties: { uuid: { type: 'string' }, name: { type: 'string' } },
+    },
+    acquiree_identifier: {
+      type: 'object',
+      properties: { uuid: { type: 'string' }, name: { type: 'string' } },
+    },
+    announced_on: { type: 'string' },
+    completed_on: { type: 'string' },
+    price: { type: 'number' },
+    price_currency_code: { type: 'string' },
+    acquisition_type: { type: 'string' },
+    acquisition_status: { type: 'string' },
+    acquisition_terms: { type: 'string' },
+    created_at: { type: 'string' },
+    updated_at: { type: 'string' },
+  },
+  required: ['uuid', 'acquirer_identifier', 'acquiree_identifier', 'announced_on'],
+} as const;
+
+const GET_ACQUISITIONS_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    count: { type: 'number' },
+    acquisitions: { type: 'array', items: ACQUISITION_SCHEMA },
+  },
+  required: ['count', 'acquisitions'],
+} as const;
+
+const PERSON_SCHEMA = {
+  type: 'object',
+  description: 'A Crunchbase person',
+  properties: {
+    uuid: { type: 'string' },
+    first_name: { type: 'string' },
+    last_name: { type: 'string' },
+    name: { type: 'string' },
+    gender: { type: 'string' },
+    linkedin_url: { type: 'string' },
+    twitter_url: { type: 'string' },
+    facebook_url: { type: 'string' },
+    featured_job_organization_uuid: { type: 'string' },
+    featured_job_organization_name: { type: 'string' },
+    featured_job_title: { type: 'string' },
+    rank: { type: 'number' },
+    created_at: { type: 'string' },
+    updated_at: { type: 'string' },
+  },
+  required: ['uuid', 'name'],
+} as const;
+
+const SEARCH_PEOPLE_OUTPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    count: { type: 'number' },
+    people: { type: 'array', items: PERSON_SCHEMA },
+  },
+  required: ['count', 'people'],
+} as const;
+
+// All tools only read data from the public Crunchbase API; none of them modify
+// anything, so every tool shares the same annotations.
+const READ_ONLY_EXTERNAL_ANNOTATIONS = {
+  readOnlyHint: true,
+  openWorldHint: true,
+} as const;
+
 // Get API key from environment variable
 const API_KEY = process.env.CRUNCHBASE_API_KEY;
 if (!API_KEY) {
@@ -216,6 +385,8 @@ class CrunchbaseMcpServer {
               },
             },
           },
+          outputSchema: SEARCH_COMPANIES_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_EXTERNAL_ANNOTATIONS,
         },
         {
           name: 'get_company_details',
@@ -230,6 +401,8 @@ class CrunchbaseMcpServer {
             },
             required: ['name_or_id'],
           },
+          outputSchema: GET_COMPANY_DETAILS_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_EXTERNAL_ANNOTATIONS,
         },
         {
           name: 'get_funding_rounds',
@@ -248,6 +421,8 @@ class CrunchbaseMcpServer {
             },
             required: ['company_name_or_id'],
           },
+          outputSchema: GET_FUNDING_ROUNDS_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_EXTERNAL_ANNOTATIONS,
         },
         {
           name: 'get_acquisitions',
@@ -265,6 +440,8 @@ class CrunchbaseMcpServer {
               },
             },
           },
+          outputSchema: GET_ACQUISITIONS_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_EXTERNAL_ANNOTATIONS,
         },
         {
           name: 'search_people',
@@ -290,6 +467,8 @@ class CrunchbaseMcpServer {
               },
             },
           },
+          outputSchema: SEARCH_PEOPLE_OUTPUT_SCHEMA,
+          annotations: READ_ONLY_EXTERNAL_ANNOTATIONS,
         },
       ],
     }));
@@ -321,6 +500,10 @@ class CrunchbaseMcpServer {
                   text: JSON.stringify(companies, null, 2),
                 },
               ],
+              structuredContent: {
+                count: companies.length,
+                companies,
+              },
             };
           }
 
@@ -337,6 +520,7 @@ class CrunchbaseMcpServer {
                   text: JSON.stringify(company, null, 2),
                 },
               ],
+              structuredContent: company,
             };
           }
 
@@ -356,6 +540,10 @@ class CrunchbaseMcpServer {
                   text: JSON.stringify(fundingRounds, null, 2),
                 },
               ],
+              structuredContent: {
+                count: fundingRounds.length,
+                funding_rounds: fundingRounds,
+              },
             };
           }
 
@@ -375,6 +563,10 @@ class CrunchbaseMcpServer {
                   text: JSON.stringify(acquisitions, null, 2),
                 },
               ],
+              structuredContent: {
+                count: acquisitions.length,
+                acquisitions,
+              },
             };
           }
 
@@ -396,6 +588,10 @@ class CrunchbaseMcpServer {
                   text: JSON.stringify(people, null, 2),
                 },
               ],
+              structuredContent: {
+                count: people.length,
+                people,
+              },
             };
           }
 
