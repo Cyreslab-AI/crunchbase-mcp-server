@@ -35,46 +35,115 @@ export class CrunchbaseAPI {
   }
 
   /**
-   * Search for companies based on various criteria
+   * Search for companies based on various criteria.
+   *
+   * Rewritten from a GET-based Lucene query string (which now 404s - see the
+   * routing note on resolveOrganizationId) to the current POST-based Search
+   * API. Field IDs/operators confirmed against https://data.crunchbase.com/reference/searchorganizations.md:
+   * `identifier` (text, contains), `founded_on` (date_precision, gte/lte),
+   * `status` (enum: closed/ipo/operating/was_acquired, eq). `location`/
+   * `category` are the hard part: `location_identifiers`/`category_groups`
+   * are `identifier_multi` fields (operators: includes/includes_all/
+   * not_includes/not_includes_all/blank - no eq/contains on plain text), so
+   * a caller-supplied name has to be resolved to a Crunchbase identifier via
+   * /autocompletes first.
    */
   async searchCompanies(params: SearchCompaniesInput): Promise<Company[]> {
     try {
-      // Build the query string based on the provided parameters
-      let query = params.query || '';
+      const query: Array<{ type: string; field_id: string; operator_id: string; values: string[] }> = [];
 
-      if (params.location) {
-        query += ` AND location:${params.location}`;
-      }
-
-      if (params.category) {
-        query += ` AND category:${params.category}`;
+      if (params.query) {
+        query.push({ type: 'predicate', field_id: 'identifier', operator_id: 'contains', values: [params.query] });
       }
 
       if (params.founded_after) {
-        query += ` AND founded_on:>=${params.founded_after}`;
+        query.push({ type: 'predicate', field_id: 'founded_on', operator_id: 'gte', values: [params.founded_after] });
       }
 
       if (params.founded_before) {
-        query += ` AND founded_on:<=${params.founded_before}`;
+        query.push({ type: 'predicate', field_id: 'founded_on', operator_id: 'lte', values: [params.founded_before] });
       }
 
       if (params.status) {
-        query += ` AND status:${params.status}`;
+        query.push({ type: 'predicate', field_id: 'status', operator_id: 'eq', values: [params.status] });
       }
 
-      const response = await this.client.get<CrunchbaseApiResponse<Company[]>>('/searches/organizations', {
-        params: {
-          query,
-          limit: params.limit || 10,
-          order: 'rank DESC'
+      if (params.location) {
+        const locationId = await this.resolveIdentifier(params.location, 'locations');
+        if (locationId) {
+          query.push({ type: 'predicate', field_id: 'location_identifiers', operator_id: 'includes', values: [locationId] });
         }
+      }
+
+      if (params.category) {
+        const categoryId = await this.resolveIdentifier(params.category, 'category_groups');
+        if (categoryId) {
+          query.push({ type: 'predicate', field_id: 'category_groups', operator_id: 'includes', values: [categoryId] });
+        }
+      }
+
+      const response = await this.client.post('/searches/organizations', {
+        field_ids: [
+          'identifier', 'short_description', 'website_url', 'linkedin', 'twitter', 'facebook',
+          'location_identifiers', 'categories', 'founded_on', 'closed_on',
+          'num_employees_enum', 'status', 'rank_org', 'created_at', 'updated_at'
+        ],
+        query,
+        limit: params.limit || 10
       });
 
-      return response.data.data;
+      return this.extractEntities<any>(response.data).map((entity) => this.flattenOrganization(entity));
     } catch (error) {
       console.error('Error searching companies:', error);
       throw this.handleError(error);
     }
+  }
+
+  /**
+   * Resolve a free-text name (e.g. "San Francisco", "Fintech") to a
+   * Crunchbase identifier UUID via /autocompletes, for use as the value of
+   * an identifier_multi search predicate (location_identifiers,
+   * category_groups). Returns undefined rather than throwing when nothing
+   * matches, since an unresolvable location/category name is a "no results"
+   * condition for the caller's filter, not a hard error.
+   */
+  private async resolveIdentifier(name: string, collectionId: 'locations' | 'category_groups'): Promise<string | undefined> {
+    const response = await this.client.get('/autocompletes', {
+      params: { query: name, collection_ids: collectionId, limit: 1 }
+    });
+    const entities = Array.isArray(response.data?.entities) ? response.data.entities : [];
+    return entities[0]?.identifier?.uuid;
+  }
+
+  /**
+   * Flatten a POST Search API organization entity - `{ uuid, permalink,
+   * properties: { identifier: { value, uuid, permalink }, ... } }` - into
+   * the flat `Company` shape (`name`, `uuid`, `permalink`, ...) the rest of
+   * this server already expects, matching the field names the legacy
+   * GET-based endpoint used to return. Best-effort: exact property casing
+   * for the less-common fields (num_employees_enum, rank_org) couldn't be
+   * confirmed against a live paid key, so those are passed through as-is
+   * alongside the confirmed identifier/date/status remapping.
+   */
+  private flattenOrganization(entity: any): Company {
+    const identifier = entity?.identifier ?? {};
+    return {
+      uuid: entity.uuid ?? identifier.uuid,
+      name: identifier.value ?? entity.name,
+      short_description: entity.short_description,
+      website_url: entity.website_url,
+      linkedin_url: entity.linkedin?.value ?? entity.linkedin_url,
+      twitter_url: entity.twitter?.value ?? entity.twitter_url,
+      facebook_url: entity.facebook?.value ?? entity.facebook_url,
+      location_identifiers: entity.location_identifiers,
+      categories: entity.categories,
+      founded_on: entity.founded_on,
+      closed_on: entity.closed_on,
+      status: entity.status,
+      rank: entity.rank_org ?? entity.rank,
+      created_at: entity.created_at,
+      updated_at: entity.updated_at
+    } as Company;
   }
 
   /**
@@ -447,34 +516,78 @@ export class CrunchbaseAPI {
   }
 
   /**
-   * Search for people based on various criteria
+   * Search for people based on various criteria.
+   *
+   * Rewritten from a GET-based Lucene query string (which now 404s) to the
+   * current POST-based Search API, per https://data.crunchbase.com/reference/searchpeople.md.
+   * That reference confirms there is no `featured_job_organization_identifier`/
+   * `featured_job_title` field in the current API - the equivalents are
+   * `primary_organization` (an identifier field: the person's current
+   * employer, filterable by eq on an org identifier/uuid) and
+   * `primary_job_title` (text_short, filterable by contains). `company` is
+   * therefore resolved via the existing org name-search helper first, same
+   * as every other "resolve a name to an id" path in this file.
    */
   async searchPeople(params: SearchPeopleInput): Promise<Person[]> {
     try {
-      // Build the query string based on the provided parameters
-      let query = params.query || '';
+      const query: Array<{ type: string; field_id: string; operator_id: string; values: string[] }> = [];
 
-      if (params.company) {
-        query += ` AND featured_job_organization_name:${params.company}`;
+      if (params.query) {
+        query.push({ type: 'predicate', field_id: 'identifier', operator_id: 'contains', values: [params.query] });
       }
 
       if (params.title) {
-        query += ` AND featured_job_title:${params.title}`;
+        query.push({ type: 'predicate', field_id: 'primary_job_title', operator_id: 'contains', values: [params.title] });
       }
 
-      const response = await this.client.get<CrunchbaseApiResponse<Person[]>>('/searches/people', {
-        params: {
-          query,
-          limit: params.limit || 10,
-          order: 'rank DESC'
-        }
+      if (params.company) {
+        const companyId = await this.resolveOrganizationId({ name_or_id: params.company });
+        query.push({ type: 'predicate', field_id: 'primary_organization', operator_id: 'eq', values: [companyId] });
+      }
+
+      const response = await this.client.post('/searches/people', {
+        field_ids: [
+          'identifier', 'first_name', 'last_name', 'gender', 'linkedin', 'twitter', 'facebook',
+          'primary_organization', 'primary_job_title', 'rank_person', 'created_at', 'updated_at'
+        ],
+        query,
+        limit: params.limit || 10
       });
 
-      return response.data.data;
+      return this.extractEntities<any>(response.data).map((entity) => this.flattenPerson(entity));
     } catch (error) {
       console.error('Error searching people:', error);
       throw this.handleError(error);
     }
+  }
+
+  /**
+   * Flatten a POST Search API person entity into the flat `Person` shape
+   * this server already exposes (`featured_job_organization_uuid/_name`,
+   * `featured_job_title`) so existing tool callers see no shape change,
+   * even though the current API's own field names are `primary_organization`/
+   * `primary_job_title`. Best-effort on the exact social-link property
+   * casing, same caveat as flattenOrganization.
+   */
+  private flattenPerson(entity: any): Person {
+    const identifier = entity?.identifier ?? {};
+    const primaryOrg = entity?.primary_organization ?? {};
+    return {
+      uuid: entity.uuid ?? identifier.uuid,
+      first_name: entity.first_name,
+      last_name: entity.last_name,
+      name: identifier.value ?? entity.name,
+      gender: entity.gender,
+      linkedin_url: entity.linkedin?.value ?? entity.linkedin_url,
+      twitter_url: entity.twitter?.value ?? entity.twitter_url,
+      facebook_url: entity.facebook?.value ?? entity.facebook_url,
+      featured_job_organization_uuid: primaryOrg.uuid,
+      featured_job_organization_name: primaryOrg.value,
+      featured_job_title: entity.primary_job_title,
+      rank: entity.rank_person ?? entity.rank,
+      created_at: entity.created_at,
+      updated_at: entity.updated_at
+    } as Person;
   }
 
   /**
